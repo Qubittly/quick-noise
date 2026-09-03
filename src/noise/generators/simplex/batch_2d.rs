@@ -1,6 +1,6 @@
 use std::f32::consts::SQRT_2;
 
-use simply_simd::{Arch, Simd, enable_targets};
+use simply_simd::{ Arch, Simd, enable_targets };
 
 use crate::api::batch::interface::BatchGenerator;
 use crate::noise::generators::Simplex;
@@ -119,5 +119,29 @@ impl BatchGenerator<2> for Simplex {
         let dot_hi = x_grads_hi.mul_add(x_dist_hi, y_grads_hi * y_dist_hi);
 
         t4_lo.mul_add(dot_lo, t4_mi.mul_add(dot_mi, t4_hi * dot_hi))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use simply_simd::Simd;
+
+    use crate::api::batch::interface::BatchGenerator;
+    use crate::api::seed::gen_octave_seed;
+    use crate::math::random::Random;
+    use crate::simd::StaticArch;
+    use crate::{ Fbm, Grid, Simplex };
+    #[cfg(feature = "image")]
+    use crate::emit::NoiseImageExt;
+
+    #[test]
+    #[cfg(feature = "image")]
+    fn batch_image() {
+        let grid = Grid::<2>::new(256, 256).seed(42).sample_position(-128, -128);
+
+        grid.builder::<Fbm, Simplex>()
+            .frequency(1.0 / 32.0)
+            .into_iter()
+            .to_grayscale_image(256, 256, "test_images/batch_2d_simplex_seeded.png");
     }
 }

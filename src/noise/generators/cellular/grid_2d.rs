@@ -545,6 +545,7 @@ mod tests {
     use crate::api::seed::gen_octave_seed;
     use crate::math::random::Random;
     use crate::simd::StaticArch;
+    use crate::BatchGenerator;
     use crate::{ Cellular, Fbm, Grid };
 
     #[test]
@@ -609,9 +610,9 @@ mod tests {
         let mut max_diff = 0.0f32;
         for y in 0..h {
             for x in 0..w {
-                let px = (offset_x as f32 + x as f32) * freq;
-                let py = (offset_y as f32 + y as f32) * freq;
-                let reference = reference_cellular(octave_seed, px, py);
+                let px = offset_x as f32 + x as f32;
+                let py = offset_y as f32 + y as f32;
+                let reference = reference(octave_seed, px, py, freq);
                 let actual = result[y * w + x];
                 max_diff = max_diff.max((actual - reference).abs());
             }
@@ -622,23 +623,12 @@ mod tests {
         );
     }
 
-    fn reference_cellular(seed: u32, px: f32, py: f32) -> f32 {
-        let cell_x = px.floor() as i32;
-        let cell_y = py.floor() as i32;
-        let sx = px - px.floor();
-        let sy = py - py.floor();
-
-        let mut min_dist = f32::MAX;
-        for ox in -3..=3 {
-            for oy in -3..=3 {
-                let (jx, jy) = split_hash(
-                    hash_cell::<StaticArch>((cell_x + ox) as u32, (cell_y + oy) as u32, seed)
-                );
-                let dx = sx - ((ox as f32) + jx);
-                let dy = sy - ((oy as f32) + jy);
-                min_dist = min_dist.min(dx.mul_add(dx, dy * dy));
-            }
-        }
-        min_dist.sqrt()
+    fn reference(seed: u32, px: f32, py: f32, freq: f32) -> f32 {
+        let gain = Cellular::sample_batch::<StaticArch>(
+            seed,
+            [Simd::splat(px), Simd::splat(py)],
+            [Simd::splat(freq), Simd::splat(freq)]
+        );
+        gain.to_array()[0]
     }
 }
