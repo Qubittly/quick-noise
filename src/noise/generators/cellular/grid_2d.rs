@@ -161,11 +161,6 @@ impl RowWindow {
     }
 }
 
-#[inline(always)]
-pub(super) fn hash_cell<A: Arch>(x: u32, y: u32, seed: u32) -> u32 {
-    hash_cell_with_y::<A>(x, hash_cell_y::<A>(y, seed), seed)
-}
-
 /// Hashes `LANES` consecutive lattice columns from a pre-built `lx_v` vector
 /// at fixed y in one shot
 #[inline(always)]

@@ -14,6 +14,7 @@ use crate::noise::util::grid_helpers::{
 use crate::{ GridGenerator, Simplex };
 
 const SQRT_3: f32 = 1.732_050_8;
+const SKEW_2D: f32 = (SQRT_3 - 1.0) / 2.0;
 const UNSKEW_2D: f32 = (3.0 - SQRT_3) / 6.0;
 
 const SCALE: f32 = 80.0;
@@ -60,10 +61,10 @@ fn cell_gradients<A: Arch>(i: i32, j: i32, seed: u32) -> [(f32, f32); 4] {
     [corner(i, j), corner(i + 1, j), corner(i, j + 1), corner(i + 1, j + 1)]
 }
 
-/// The three-corner simplex sum. `x0`/`y0` are the
+/// The three-corner simplex sum. `x_lo`/`y_lo` are the
 /// low-corner distances for this cell..
 #[inline(always)]
-fn simplex_calc(x0: f32, y0: f32, grads: &[(f32, f32); 4], upper: bool) -> f32 {
+fn simplex_calc(x_lo: f32, y_lo: f32, grads: &[(f32, f32); 4], upper: bool) -> f32 {
     let subbed_unskew = UNSKEW_2D - 1.0;
     let hi_skew_offset = 2.0 * UNSKEW_2D - 1.0;
 
@@ -72,15 +73,15 @@ fn simplex_calc(x0: f32, y0: f32, grads: &[(f32, f32); 4], upper: bool) -> f32 {
     let (gx_hi, gy_hi) = grads[3];
 
     let (x_mi, y_mi) = if upper {
-        (x0 + subbed_unskew, y0 + UNSKEW_2D)
+        (x_lo + subbed_unskew, y_lo + UNSKEW_2D)
     } else {
-        (x0 + UNSKEW_2D, y0 + subbed_unskew)
+        (x_lo + UNSKEW_2D, y_lo + subbed_unskew)
     };
-    let (x_hi, y_hi) = (x0 + hi_skew_offset, y0 + hi_skew_offset);
+    let (x_hi, y_hi) = (x_lo + hi_skew_offset, y_lo + hi_skew_offset);
 
-    let t_lo_pre = 0.5 - x0.mul_add(x0, y0 * y0);
+    let t_lo_pre = 0.5 - x_lo.mul_add(x_lo, y_lo * y_lo);
     let t_mi = (0.5 - x_mi.mul_add(x_mi, y_mi * y_mi)).max(0.0);
-    let t_hi_pre = t_lo_pre + ((2.0 * SQRT_3) / 3.0).mul_add(x0 + y0, -2.0 / 3.0);
+    let t_hi_pre = t_lo_pre + ((2.0 * SQRT_3) / 3.0).mul_add(x_lo + y_lo, -2.0 / 3.0);
     let t_lo = t_lo_pre.max(0.0);
     let t_hi = t_hi_pre.max(0.0);
 
@@ -88,7 +89,7 @@ fn simplex_calc(x0: f32, y0: f32, grads: &[(f32, f32); 4], upper: bool) -> f32 {
     let t2_mi = t_mi * t_mi;
     let t2_hi = t_hi * t_hi;
 
-    let dot_lo = gx_lo.mul_add(x0, gy_lo * y0);
+    let dot_lo = gx_lo.mul_add(x_lo, gy_lo * y_lo);
     let dot_mi = gx_mi.mul_add(x_mi, gy_mi * y_mi);
     let dot_hi = gx_hi.mul_add(x_hi, gy_hi * y_hi);
 
@@ -109,93 +110,88 @@ impl GridGenerator<2> for Simplex {
         validate_grid_size(params.grid_size, dst.len());
         validate_state_size::<C, A, _>(params.grid_size, dst.len());
 
-        let grid_data = SimplexGridData::new(&params);
+        let grid_data = SimplexGridData::<2>::new(&params);
+
         let row_width = grid_data.grid_size[0];
 
-        let [i_lo, i_hi, j_lo, j_hi] = grid_data.cell_bounds();
+        // Rate of change on the horizontal axis
+        let dsx = grid_data.increment[0] * (1.0 + SKEW_2D);
+        let dsy = grid_data.increment[0] * SKEW_2D;
 
-        // iterate over the skewed lattice cells that intersect the output grid.
-        for j in j_lo..=j_hi {
-            for i in i_lo..=i_hi {
-                // Clip the cell's rhombus/diamond to a small output sample range.
-                let Some([ox_lo, ox_hi, oy_lo, oy_hi]) = grid_data.cell_bbox(i, j) else {
-                    continue;
+        // iterate over the output samples
+        for oy in 0..grid_data.grid_size[1] {
+            let y = grid_data.origin[1] + oy as f32 * grid_data.increment[1];
+            let row_start = oy * row_width;
+
+            // Starting skewed position for this row
+            let [mut sx, mut sy] = grid_data.skew(&[grid_data.origin[0], y]);
+            
+            // Current cell
+            let mut cur_i = sx.floor() as i32;
+            let mut cur_j = sy.floor() as i32;
+            // Unskewed low corner `(cx, cy)` of this cell: the sample's
+            // low-corner distances are `(x_lo - cx, y_lo - cy)`.
+            let [mut cx, mut cy] = grid_data.unskew(&[cur_i, cur_j]);
+            // corner gradients stay constant across the whole cell
+            let mut grads = cell_gradients::<A>(cur_i, cur_j, params.seed);
+
+            for ox in 0..row_width {
+                // Check if we've entered into a new cell
+                let i = sx.floor() as i32;
+                let j = sy.floor() as i32;
+                
+                if i != cur_i || j != cur_j { // if so use the new cell for the calc
+                    cur_i = i;
+                    cur_j = j;
+                    [cx, cy] = grid_data.unskew(&[cur_i, cur_j]);
+                    grads = cell_gradients::<A>(cur_i, cur_j, params.seed);
+                }
+
+                let x = grid_data.origin[0] + ox as f32 * grid_data.increment[0];
+                let x_lo = x - cx;
+                let y_lo = y - cy;
+                let upper = x_lo > y_lo;
+                let value = simplex_calc(x_lo, y_lo, &grads, upper) * grid_data.weight;
+
+                // Combiner
+                let sample_start = row_start + ox;
+                let sample_end = sample_start + 1;
+
+                let (cur_state, mut result) = if INIT {
+                    C::initialize_sample(&combiner, Simd::splat(value))
+                } else {
+                    let mut cur_state = C::State::<A>::default();
+                    for k in 0..C::State::<A>::STATE_SIZE {
+                        let offset = k * grid_data.total_size;
+                        cur_state[k] = unsafe {
+                            maybe_tail_load::<A, true>(sample_start + offset..sample_end + offset, state)
+                        };
+                    }
+                    let cur_result = unsafe {
+                        maybe_tail_load::<A, true>(sample_start..sample_end, dst)
+                    };
+                    C::apply_sample(&combiner, cur_state, cur_result, Simd::splat(value))
                 };
 
-                // corner gradients stay constant across the whole cell
-                let grads = cell_gradients::<A>(i, j, params.seed);
-
-                // Unskewed low corner `(cx, cy)` of this cell: the sample's
-                // low-corner distances are `(x_lo - cx, y_lo - cy)`.
-                let [cx, cy] = grid_data.unskew(i, j);
-
-                // iterate over the output samples 
-                for oy in oy_lo..oy_hi {
-                    let y_lo = grid_data.origin[1] + oy as f32 * grid_data.increment[1];
-                    let y0 = y_lo - cy;
-
-                    for ox in ox_lo..ox_hi {
-                        let x_lo = grid_data.origin[0] + ox as f32 * grid_data.increment[0];
-                        let [sx, sy] = grid_data.skew(x_lo, y_lo);
-                        let x0 = x_lo - cx;
-
-                        // This output sample is only produced by the
-                        // cell whose skewed floor matches its skewed coordinate.
-                        if sx.floor() as i32 == i && sy.floor() as i32 == j {
-                            let upper = x0 > y0;
-
-                            let value = simplex_calc(x0, y0, &grads, upper) * grid_data.weight;
-
-                            let sample_start = (oy as usize) * row_width + (ox as usize);
-                            let sample_end = sample_start + 1;
-
-                            let (cur_state, mut result) = if INIT {
-                                C::initialize_sample(&combiner, Simd::splat(value))
-                            } else {
-                                let mut cur_state = C::State::<A>::default();
-                                for k in 0..C::State::<A>::STATE_SIZE {
-                                    let offset = k * grid_data.total_size;
-                                    cur_state[k] = unsafe {
-                                        maybe_tail_load::<A, true>(
-                                            sample_start + offset..sample_end + offset,
-                                            state,
-                                        )
-                                    };
-                                }
-                                let cur_result = unsafe {
-                                    maybe_tail_load::<A, true>(sample_start..sample_end, dst)
-                                };
-                                C::apply_sample(
-                                    &combiner,
-                                    cur_state,
-                                    cur_result,
-                                    Simd::splat(value),
-                                )
-                            };
-
-                            if !FINAL {
-                                for k in 0..C::State::<A>::STATE_SIZE {
-                                    let offset = k * grid_data.total_size;
-                                    unsafe {
-                                        maybe_tail_store::<A, true>(
-                                            sample_start + offset..sample_end + offset,
-                                            cur_state[k],
-                                            state,
-                                        );
-                                    }
-                                }
-                            }
-
-                            if FINAL {
-                                result = C::finalize_sample(&combiner, cur_state, result);
-                            }
-
-                            unsafe {
-                                maybe_tail_store::<A, true>(sample_start..sample_end, result, dst);
-                            }
+                if !FINAL {
+                    for k in 0..C::State::<A>::STATE_SIZE {
+                        let offset = k * grid_data.total_size;
+                        unsafe {
+                            maybe_tail_store::<A, true>(sample_start + offset..sample_end + offset, cur_state[k], state);
                         }
                     }
                 }
+
+                if FINAL {
+                    result = C::finalize_sample(&combiner, cur_state, result);
+                }
+
+                unsafe {
+                    maybe_tail_store::<A, true>(sample_start..sample_end, result, dst);
+                }
+
+                sx += dsx;
+                sy += dsy;
             }
         }
     }

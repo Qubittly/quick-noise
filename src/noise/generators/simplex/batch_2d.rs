@@ -124,15 +124,18 @@ impl BatchGenerator<2> for Simplex {
 
 #[cfg(test)]
 mod tests {
-    use simply_simd::Simd;
-
-    use crate::api::batch::interface::BatchGenerator;
-    use crate::api::seed::gen_octave_seed;
-    use crate::math::random::Random;
-    use crate::simd::StaticArch;
-    use crate::{ Fbm, Grid, Simplex };
     #[cfg(feature = "image")]
     use crate::emit::NoiseImageExt;
+    #[cfg(feature = "image")]
+    use simply_simd::Simd;
+    #[cfg(feature = "image")]
+    use crate::api::batch::interface::BatchGenerator;
+    #[cfg(feature = "image")]
+    use crate::api::seed::gen_octave_seed;
+    #[cfg(feature = "image")]
+    use crate::simd::StaticArch;
+    #[cfg(feature = "image")]
+    use crate::{ Fbm, Grid, Simplex };
 
     #[test]
     #[cfg(feature = "image")]
