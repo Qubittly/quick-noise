@@ -43,6 +43,8 @@ const NEIGHBORS_12: [(i32, i32); 12] = [
     ( 1,  2),
 ];
 
+const CANDIDATES: usize = 12;
+
 /// 2D Plane Window
 struct Window {
     rows: [*mut f32; 4],
@@ -209,9 +211,12 @@ impl<F: DistanceFn> GridGenerator<2> for Cellular<F> {
         validate_grid_size(params.grid_size, dst.len());
         validate_state_size::<C, A, _>(params.grid_size, state.len());
         let padded_size = pad_grid_size::<A, _>(params.grid_size);
+        let max_blocks = (padded_size[0] + Simd::<f32, A>::LANES - 1) /
+            Simd::<f32, A>::LANES;
 
         let required_cache =
-            padded_size[1] * 3 + padded_size[0] * 3 + (padded_size[0] + 1) * 8 + 24;
+            padded_size[1] * 3 + padded_size[0] * 3 + (padded_size[0] + 1) * 8 + 24 +
+            CANDIDATES * max_blocks * Simd::<f32, A>::LANES;
         let mut cache = ArenaBuffer::<A>::with_capacity(required_cache);
         let mut arena = Arena::with_cache(&mut cache);
         let mut sub_arena = arena.allocate_arena(padded_size[0] * 3 + padded_size[1] * 3);
@@ -221,6 +226,7 @@ impl<F: DistanceFn> GridGenerator<2> for Cellular<F> {
         let row_len = grid_data.num_loops[0] + 3;
         let mut window = Window::new(&mut arena, row_len);
         let mut cell_jitters = CellJitters::new(&mut arena);
+        let dx_buff = arena.allocate::<f32>(CANDIDATES * max_blocks * Simd::<f32, A>::LANES);
 
         // Pre-fill the 4 rows: fir (y-1), sec (y=0), thi (y=1), fou (y=2)
         let lx_offset = grid_data.grid_start[0] - 1;
@@ -255,6 +261,7 @@ impl<F: DistanceFn> GridGenerator<2> for Cellular<F> {
                     x_next_idx,
                     y_idx,
                     y_next_idx,
+                    dx_buff,
                     dst,
                     state,
                     &combiner,
@@ -289,6 +296,7 @@ fn fill_cell<A: Arch, C: Combiner, F: DistanceFn, const INIT: bool, const FINAL:
     x_next: usize,
     y_idx: usize,
     y_next: usize,
+    dx_buff: &mut [MaybeUninit<f32>],
     dst: &mut [f32],
     state: &mut [f32],
     combiner_config: &C::Config,
@@ -299,11 +307,30 @@ fn fill_cell<A: Arch, C: Combiner, F: DistanceFn, const INIT: bool, const FINAL:
 
     let weight_vec = Simd::<f32, A>::splat(grid_data.weight);
 
+    let len = (x_idx..x_next).len();
+    let num_blocks = (len + lanes - 1) / lanes;
+    let full_blocks = len / lanes;
+    let tail_len = len % lanes;
+
+    for c in 0..CANDIDATES {
+        let jx: Simd<f32, A> = Simd::splat(unsafe { (*jit.parts.add(c * 2)).assume_init() });
+        for b in 0..full_blocks {
+            let sx = unsafe { grid_data.distances[0].load_simd(x_idx + b * lanes) };
+            let offset = (c * num_blocks + b) * lanes;
+            unsafe { dx_buff.write_simd(offset, F::modify_delta(sx - jx, &dst_cfg)); }
+        }
+        if tail_len != 0 {
+            let sx = unsafe { grid_data.distances[0].load_simd(x_idx + full_blocks * lanes) };
+            let offset = (c * num_blocks + full_blocks) * lanes;
+            unsafe { dx_buff.write_simd(offset, F::modify_delta(sx - jx, &dst_cfg)); }
+        }
+    }
+
     for y in y_idx..y_next {
         let sy = unsafe { grid_data.distances[1].get_unchecked(y).assume_init() };
         let row_start = y * row_width;
 
-        let dy_mod: [MaybeUninit<Simd<f32, A>>; 12] = std::array::from_fn(|c| {
+        let dy_mod: [MaybeUninit<Simd<f32, A>>; CANDIDATES] = std::array::from_fn(|c| {
             // Stride 2, y is component 1
             let jy = unsafe { (*jit.parts.add(c * 2 + 1)).assume_init() };
             let dy = Simd::<f32, A>::splat(sy) - Simd::<f32, A>::splat(jy);
